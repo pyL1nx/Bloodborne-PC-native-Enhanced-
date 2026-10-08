@@ -2,8 +2,7 @@
 
 An optimized, native Linux build of the *Bloodborne* PC port featuring a custom C-based runtime achievement tracking engine and an interactive companion UI launcher.
 
-![Uploading swappy-20261008_193643.png…]()
-
+<img width="1801" height="1009" alt="swappy-20261008_193643" src="https://github.com/user-attachments/assets/975ec438-d06c-489b-9839-1a517d526e1a" />
 
 ---
 
