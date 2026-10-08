@@ -21,22 +21,16 @@ sudo pacman -S --needed base-devel cmake vulkan-headers glslang zydis xbyak mini
 
     Clone the repository
     :
-    ``bash
     git clone [https://github.com/pyL1nx/Bloodborne-PC-native-Enhanced-.git](https://github.com/pyL1nx/Bloodborne-PC-native-Enhanced-.git)
     cd Bloodborne-PC-native-Enhanced-
-    ```
 
     Compile the engine:
     
-    ```bash
     bash build.sh
-    ```
 
     Launch the game and launcher:
     
-    ```bash
     bash launcher/bb-launcher.sh
-    ```
 
 ## **Project Structure**
 
