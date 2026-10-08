@@ -19,8 +19,8 @@ sudo pacman -S --needed base-devel cmake vulkan-headers glslang zydis xbyak mini
 ```
 ## **Building & Running**
 
-    Clone the repository
-    :
+    Clone the repository:
+    
     git clone [https://github.com/pyL1nx/Bloodborne-PC-native-Enhanced-.git](https://github.com/pyL1nx/Bloodborne-PC-native-Enhanced-.git)
     cd Bloodborne-PC-native-Enhanced-
 
