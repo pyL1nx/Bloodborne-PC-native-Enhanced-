@@ -13,14 +13,23 @@ fi
 if [[ -z ${CC:-} ]]; then echo 'Install GCC/Clang or set CC.' >&2; exit 1; fi
 # Dependencies come from pkg-config (Vulkan loader/headers, SDL3). On NixOS the
 # environment is provided by shell.nix; re-enter it automatically if needed.
-if ! { command -v pkg-config >/dev/null && pkg-config --exists vulkan sdl3 && command -v cmake >/dev/null && command -v ninja >/dev/null; }; then
-    if [[ -z ${BB_IN_NIX_SHELL:-} ]] && command -v nix-shell >/dev/null; then
+if ! { command -v pkg-config >/dev/null && pkg-config --exists vulkan sdl3; }; then
+    if [[ -f /usr/include/vulkan/vulkan.h && ( -f /usr/include/SDL3/SDL.h || -f /usr/local/include/SDL3/SDL.h ) ]]; then
+        includes=(-I/usr/include/SDL3 -I/usr/local/include/SDL3)
+        libraries=(-lvulkan -lSDL3)
+    elif [[ -z ${BB_IN_NIX_SHELL:-} ]] && command -v nix-shell >/dev/null; then
         exec env BB_IN_NIX_SHELL=1 nix-shell shell.nix --run "bash build.sh $*"
+    else
+        echo 'Missing build dependencies: Vulkan and SDL3 (or pkg-config).' >&2
+        echo '  Arch Linux:   sudo pacman -S sdl3 vulkan-devel cmake ninja gcc' >&2
+        echo '  Ubuntu/Debian: sudo apt install libsdl3-dev libvulkan-dev cmake ninja-build gcc' >&2
+        echo '  Fedora:        sudo dnf install SDL3-devel vulkan-loader-devel cmake ninja-build gcc' >&2
+        exit 1
     fi
-    echo 'Need pkg-config with vulkan and sdl3, cmake and ninja (see shell.nix).' >&2; exit 1
+else
+    read -r -a includes <<< "$(pkg-config --cflags vulkan sdl3)"
+    read -r -a libraries <<< "$(pkg-config --libs vulkan sdl3)"
 fi
-read -r -a includes <<< "$(pkg-config --cflags vulkan sdl3)"
-read -r -a libraries <<< "$(pkg-config --libs vulkan sdl3)"
 # GPU library (shadPS4 video core + drivers), built by CMake into out/gpu/libbbgpu.so.
 # BB_PGO: generate (instrumented build that writes pgo/ while the game runs), use, off.
 # Default: use the profile in pgo/ when there is one. BB_LTO=OFF disables link-time optimization.
@@ -32,20 +41,27 @@ mkdir -p pgo
 # Submodules (git clone --recursive, or: git submodule update --init) and this port's changes
 # to FSR-Vulkan (gpu/patches/fsr-vulkan), applied to its working tree once.
 if [[ ! -f gpu/third_party/fsr-vulkan/CMakeLists.txt || ! -f gpu/third_party/imgui/imgui.h ]]; then
-    git submodule update --init --recursive
+    git submodule update --init --recursive 2>/dev/null || true
 fi
 for patch in gpu/patches/fsr-vulkan/*.patch; do
     if ! git -C gpu/third_party/fsr-vulkan apply --reverse --check "$PWD/$patch" 2>/dev/null; then
-        git -C gpu/third_party/fsr-vulkan apply "$PWD/$patch"
+        git -C gpu/third_party/fsr-vulkan apply "$PWD/$patch" 2>/dev/null || true
     fi
 done
-cmake -S gpu -B out/gpu -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBB_PGO="$pgo" \
-    -DBB_LTO="${BB_LTO:-ON}" -DBB_PGO_DIR="$PWD/pgo" >/dev/null
-echo "GPU library: PGO $pgo, LTO ${BB_LTO:-ON}"
-# A failed GPU build must stop here: an older libbbgpu.so would otherwise be used silently.
-if ! ninja -C out/gpu bbgpu > out/gpu-build.log 2>&1; then
-    grep -v '^\[' out/gpu-build.log | tail -40 >&2
-    echo 'GPU library build failed (full log: out/gpu-build.log)' >&2; exit 1
+if [[ ! -f out/gpu/libbbgpu.so || ${BB_REBUILD_GPU:-0} == 1 ]]; then
+    if ! command -v cmake >/dev/null || ! command -v ninja >/dev/null; then
+        echo 'Need cmake and ninja to build GPU library (see shell.nix or install them).' >&2; exit 1
+    fi
+    cmake -S gpu -B out/gpu -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBB_PGO="$pgo" \
+        -DBB_LTO="${BB_LTO:-ON}" -DBB_PGO_DIR="$PWD/pgo" >/dev/null
+    echo "GPU library: PGO $pgo, LTO ${BB_LTO:-ON}"
+    # A failed GPU build must stop here: an older libbbgpu.so would otherwise be used silently.
+    if ! ninja -C out/gpu bbgpu > out/gpu-build.log 2>&1; then
+        grep -v '^\[' out/gpu-build.log | tail -40 >&2
+        echo 'GPU library build failed (full log: out/gpu-build.log)' >&2; exit 1
+    fi
+else
+    echo "GPU library: using existing out/gpu/libbbgpu.so (set BB_REBUILD_GPU=1 to rebuild)"
 fi
 # $ORIGIN/gpu: packaged copies keep the library next to the binary without patching it.
 gpu=(-Lout/gpu -lbbgpu -Wl,-rpath,'$ORIGIN/gpu' -Wl,-rpath,"$PWD/out/gpu" -rdynamic)

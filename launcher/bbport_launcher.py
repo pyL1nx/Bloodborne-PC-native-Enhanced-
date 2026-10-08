@@ -15,6 +15,7 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
+from bbport_achievements import AchievementPanel
 from bbport_assets import fsr411_problem
 from bbport_i18n import language, set_language, tr
 from bbport_vulkan import amd_gpu
@@ -238,10 +239,30 @@ def fsr411_build_command(upscaler, loader=None):
     return command + ([str(loader)] if loader else []), env
 
 
+def resolve_game_path(p_in=""):
+    """Finds eboot.bin, automatically resolving nested CUSA03173 folders or common locations."""
+    if p_in:
+        p = Path(p_in).expanduser()
+        if (p / "eboot.bin").is_file():
+            return p
+        if (p / "CUSA03173" / "eboot.bin").is_file():
+            return p / "CUSA03173"
+    candidates = [
+        PORT_DIR.parent / "CUSA03173",
+        PORT_DIR.parent / "CUSA03173" / "CUSA03173",
+        Path.home() / "CUSA03173",
+        Path.home() / "CUSA03173" / "CUSA03173",
+    ]
+    for c in candidates:
+        if (c / "eboot.bin").is_file():
+            return c
+    return Path(p_in).expanduser() if p_in else (PORT_DIR.parent / "CUSA03173")
+
+
 def game_environment(s):
     """Environment for run.sh from the launcher settings."""
     env = dict(os.environ)
-    env["BB_GAME_DIR"] = str(Path(s["game_dir"]).expanduser())
+    env["BB_GAME_DIR"] = str(resolve_game_path(s.get("game_dir", "")))
     if s["user_dir"]:
         env["BB_USER_DIR"] = s["user_dir"]
     env["BB_MODS_DIR"] = str(Path(s.get("mods_dir") or DATA_DIR / "mods").expanduser())
@@ -422,7 +443,11 @@ class LauncherWindow(Adw.ApplicationWindow):
 
         log_text = self.log_view.get_buffer().get_text(
             *self.log_view.get_buffer().get_bounds(), False) if hasattr(self, "log_view") else ""
-        self.stack.add_titled_with_icon(self.build_settings_page(), "settings", tr("Настройки"),
+        # Merged General page: Top achievements rectangle box + settings below
+        if hasattr(self, "_achievement_panel"):
+            self._achievement_panel.destroy_watcher()
+        self._achievement_panel = AchievementPanel(toast_overlay=self.toasts)
+        self.stack.add_titled_with_icon(self.build_general_page(), "general", tr("Общие"),
                                         "preferences-system-symbolic")
         self.stack.add_titled_with_icon(self.build_log_page(), "log", tr("Журнал"),
                                         "utilities-terminal-symbolic")
@@ -443,10 +468,15 @@ class LauncherWindow(Adw.ApplicationWindow):
         if hasattr(self, "fsr411_button"):
             self.fsr411_button.set_sensitive(not running)
 
-    # --- settings page -------------------------------------------------------------------
+    # --- general page (achievements + settings merged) -----------------------------------
 
-    def build_settings_page(self):
+    def build_general_page(self):
         page = Adw.PreferencesPage()
+
+        # Header "General" with the top achievements rectangle box inside it
+        general_group = Adw.PreferencesGroup(title=tr("Общие"))
+        general_group.add(self._achievement_panel)
+        page.add(general_group)
 
         launcher = Adw.PreferencesGroup()
         self.ui_language_row = combo_row(tr("Язык лаунчера") + " / Launcher language", None,
@@ -693,6 +723,8 @@ class LauncherWindow(Adw.ApplicationWindow):
         page.add(dev)
         return page
 
+    build_settings_page = build_general_page
+
     def on_ui_language(self, row, _param):
         choice = combo_value(row)
         if choice == self.settings.get("ui_language", ""):
@@ -711,7 +743,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         GLib.idle_add(lambda: self.build() and False)
 
     def game_dir(self):
-        return Path(self.settings["game_dir"]).expanduser()
+        return resolve_game_path(self.settings.get("game_dir", ""))
 
     def user_dir(self):
         return Path(self.settings["user_dir"]).expanduser() if self.settings["user_dir"] \
@@ -787,8 +819,8 @@ class LauncherWindow(Adw.ApplicationWindow):
 
     def update_game_status(self):
         path = self.game_dir()
-        ok = bool(self.settings["game_dir"]) and (path / "eboot.bin").is_file()
-        self.game_row.set_subtitle(str(path) if self.settings["game_dir"] else tr("не выбрана"))
+        ok = (path / "eboot.bin").is_file()
+        self.game_row.set_subtitle(str(path) if (ok or self.settings.get("game_dir")) else tr("не выбрана"))
         # Other versions of the game start and then crash in its code (issues #7, #13, #14).
         problem = self.game_problem(path) if ok else None
         if not ok:
@@ -810,7 +842,8 @@ class LauncherWindow(Adw.ApplicationWindow):
 
     def on_choose_game(self, _button):
         def chosen(path):
-            self.settings["game_dir"] = path
+            resolved = resolve_game_path(path)
+            self.settings["game_dir"] = str(resolved)
             self.update_game_status()
             self.store()
         self.choose_folder(tr("Папка игры (с eboot.bin)"), self.game_dir(), chosen)
@@ -1118,6 +1151,8 @@ class LauncherWindow(Adw.ApplicationWindow):
 
     def on_close(self, _window):
         self.store()
+        if hasattr(self, "_achievement_panel"):
+            self._achievement_panel.destroy_watcher()
         if self.process:
             self.stop_game()
         if self.fsr411_build:
@@ -1307,7 +1342,8 @@ class LauncherApp(Adw.Application):
 def play():
     """--play: the game with the saved settings, no window (Steam Deck game mode)."""
     settings = load_settings()
-    if not (Path(settings["game_dir"]).expanduser() / "eboot.bin").is_file():
+    game_path = resolve_game_path(settings.get("game_dir", ""))
+    if not (game_path / "eboot.bin").is_file():
         print("bbport: choose the game folder in the launcher first", file=sys.stderr)
         return 1
     os.chdir(PORT_DIR)

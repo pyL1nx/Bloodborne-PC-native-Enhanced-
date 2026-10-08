@@ -267,7 +267,218 @@ static ABI int32_t ime_result(uint32_t *result) {
 }
 static ABI int32_t ime_term(void) { memset(&ime,0,sizeof(ime)); return 0; }
 
-/* ---- Trophies: accepted locally, recorded in the log ---- */
+/* ---- Trophies: accepted locally, recorded to achievements.json ---- */
+
+/* Bloodborne CUSA03173 — all 40 trophies (base game + The Old Hunters DLC).
+ * Index = trophy ID the game engine fires.  NULL = reserved/unused slot. */
+static const char *trophy_names[] = {
+    /* 00 */ "Bloodborne",                       /* Platinum */
+    /* 01 */ "Hunter's Essence",
+    /* 02 */ "Hunter's Craft",
+    /* 03 */ "Weapon Master",
+    /* 04 */ "Blood Gem Master",
+    /* 05 */ "Rune Master",
+    /* 06 */ "Yharnam Sunrise",                  /* Ending A */
+    /* 07 */ "Honoring Wishes",                  /* Ending B */
+    /* 08 */ "Childhood's Beginning",            /* Ending C */
+    /* 09 */ "Cainhurst",
+    /* 10 */ "The Choir",
+    /* 11 */ "The Source of the Dream",
+    /* 12 */ "Nightmare Lecture Building",
+    /* 13 */ "Nightmare of Mensis",
+    /* 14 */ "Father Gascoigne",                 /* Required story bosses */
+    /* 15 */ "Vicar Amelia",
+    /* 16 */ "Shadow of Yharnam",
+    /* 17 */ "Rom, the Vacuous Spider",
+    /* 18 */ "The One Reborn",
+    /* 19 */ "Micolash, Host of the Nightmare",
+    /* 20 */ "Mergo's Wet Nurse",
+    /* 21 */ "Cleric Beast",                     /* Optional bosses */
+    /* 22 */ "Blood-starved Beast",
+    /* 23 */ "The Witch of Hemwick",
+    /* 24 */ "Darkbeast Paarl",
+    /* 25 */ "Amygdala",
+    /* 26 */ "Martyr Logarius",
+    /* 27 */ "Celestial Emissary",
+    /* 28 */ "Ebrietas, Daughter of the Cosmos",
+    /* 29 */ "Chalice of Pthumeru",              /* Chalice dungeons */
+    /* 30 */ "Chalice of Ailing Loran",
+    /* 31 */ "Chalice of Isz",
+    /* 32 */ "Yharnam, Pthumerian Queen",
+    /* 33 */ "Hunter's Dream",                   /* Access the dream */
+    /* 34 */ "Ludwig, the Holy Blade",           /* The Old Hunters DLC */
+    /* 35 */ "Laurence, the First Vicar",
+    /* 36 */ "Living Failures",
+    /* 37 */ "Lady Maria of the Astral Clocktower",
+    /* 38 */ "Orphan of Kos",
+    /* 39 */ "The Old Hunters",
+};
+#define TROPHY_COUNT ((int32_t)(sizeof(trophy_names)/sizeof(trophy_names[0])))
+
+typedef struct { int32_t id; char name[128]; } trophy_arg_t;
+
+#include <sys/stat.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+
+static pthread_mutex_t trophy_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Check if a trophy ID is already recorded in the JSON string (exact word match). */
+static int trophy_is_duplicate(const char *json_data, int32_t id) {
+    if (!json_data) return 0;
+    char needle[32];
+    snprintf(needle, sizeof(needle), "\"id\": %d", (int)id);
+    const char *p = json_data;
+    size_t nlen = strlen(needle);
+    while ((p = strstr(p, needle)) != NULL) {
+        char c = p[nlen];
+        if (c == ',' || c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '}') {
+            return 1;
+        }
+        p += nlen;
+    }
+    return 0;
+}
+
+/* Ensure a directory and all parent directories exist. */
+static void trophy_ensure_dir(const char *dir_path) {
+    char temp[512];
+    snprintf(temp, sizeof(temp), "%s", dir_path);
+    for (char *p = temp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(temp, 0755);
+            *p = '/';
+        }
+    }
+    mkdir(temp, 0755);
+}
+
+/* Write an unlock to ~/.local/share/bbport/achievements.json atomically and thread-safely. */
+static void trophy_write_json(int32_t id, const char *name) {
+    pthread_mutex_lock(&trophy_mutex);
+
+    const char *home = getenv("HOME");
+    if (!home) home = "/tmp";
+    char dir[512], path[560], tmp[568];
+    snprintf(dir, sizeof(dir), "%s/.local/share/bbport", home);
+    snprintf(path, sizeof(path), "%s/achievements.json", dir);
+    snprintf(tmp, sizeof(tmp), "%s/.achievements.json.tmp", dir);
+
+    trophy_ensure_dir(dir);
+
+    /* Read the existing file (if any). */
+    char *existing = NULL;
+    long existing_len = 0;
+    FILE *fp = fopen(path, "rb");
+    if (fp) {
+        fseek(fp, 0, SEEK_END);
+        existing_len = ftell(fp);
+        if (existing_len > 0) {
+            existing = (char *)malloc((size_t)existing_len + 1);
+            if (existing) {
+                fseek(fp, 0, SEEK_SET);
+                existing_len = (long)fread(existing, 1, (size_t)existing_len, fp);
+                existing[existing_len] = '\0';
+            }
+        }
+        fclose(fp);
+    }
+
+    /* Check if already recorded. */
+    if (existing && trophy_is_duplicate(existing, id)) {
+        free(existing);
+        pthread_mutex_unlock(&trophy_mutex);
+        return;
+    }
+
+    /* ISO-8601 timestamp. */
+    char timestamp[64];
+    time_t now = time(NULL);
+    struct tm lt;
+    localtime_r(&now, &lt);
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S%z", &lt);
+
+    /* Build entry. */
+    char entry[512];
+    snprintf(entry, sizeof(entry),
+             "  {\"id\": %d, \"name\": \"%s\", \"unlocked_at\": \"%s\"}",
+             (int)id, name, timestamp);
+
+    /* Write atomically to tmp file. */
+    fp = fopen(tmp, "wb");
+    if (!fp) {
+        free(existing);
+        pthread_mutex_unlock(&trophy_mutex);
+        return;
+    }
+
+    int written_ok = 0;
+    if (existing && existing_len > 1) {
+        /* Find last ']' */
+        char *bracket = NULL;
+        for (long i = existing_len - 1; i >= 0; --i) {
+            if (existing[i] == ']') { bracket = existing + i; break; }
+        }
+        if (bracket) {
+            /* Check if there was already an object inside the array. */
+            int has_objects = 0;
+            for (char *c = existing; c < bracket; c++) {
+                if (*c == '{') { has_objects = 1; break; }
+            }
+            fwrite(existing, 1, (size_t)(bracket - existing), fp);
+            if (has_objects) {
+                fprintf(fp, ",\n%s\n]", entry);
+            } else {
+                fprintf(fp, "\n%s\n]", entry);
+            }
+            written_ok = 1;
+        }
+    }
+    if (!written_ok) {
+        fprintf(fp, "[\n%s\n]", entry);
+    }
+    fflush(fp);
+    int fd = fileno(fp);
+    if (fd >= 0) fsync(fd);
+    fclose(fp);
+    free(existing);
+
+    rename(tmp, path);
+
+    /* Sync to BB_DATA_DIR/achievements.json if set and distinct */
+    const char *data_dir = getenv("BB_DATA_DIR");
+    if (data_dir && strcmp(data_dir, ".") != 0 && strcmp(data_dir, dir) != 0) {
+        char alt_path[560];
+        snprintf(alt_path, sizeof(alt_path), "%s/achievements.json", data_dir);
+        /* If alt_path exists or data_dir is configured, copy the file over */
+        FILE *src = fopen(path, "rb");
+        if (src) {
+            FILE *dst = fopen(alt_path, "wb");
+            if (dst) {
+                char buf[4096];
+                size_t n;
+                while ((n = fread(buf, 1, sizeof(buf), src)) > 0) {
+                    fwrite(buf, 1, n, dst);
+                }
+                fclose(dst);
+            }
+            fclose(src);
+        }
+    }
+
+    pthread_mutex_unlock(&trophy_mutex);
+}
+
+/* Detached thread entry: fire-and-forget so the render thread never stalls. */
+static void *trophy_thread(void *arg) {
+    trophy_arg_t *ta = (trophy_arg_t *)arg;
+    trophy_write_json(ta->id, ta->name);
+    free(ta);
+    return NULL;
+}
+
 static ABI int32_t trophy_context(int32_t *ctx,int32_t user,uint32_t label,uint64_t options) {
     (void)user; (void)label; (void)options;
     if (!ctx) return TROPHY_INVALID;
@@ -277,8 +488,25 @@ static ABI int32_t trophy_handle(int32_t *handle) { if (!handle) return TROPHY_I
 static ABI int32_t trophy_register(int32_t ctx,int32_t handle,uint64_t options) { (void)ctx; (void)handle; (void)options; return 0; }
 static ABI int32_t trophy_unlock(int32_t ctx,int32_t handle,int32_t id,int32_t *platinum) {
     (void)ctx; (void)handle;
-    printf("Runtime: trophy %d unlocked\n",id);
-    if (platinum) *platinum=-1;
+    const char *name = (id >= 0 && id < TROPHY_COUNT && trophy_names[id])
+                       ? trophy_names[id] : "Unknown Trophy";
+    printf("Runtime: [TROPHY] %d unlocked — %s\n", id, name);
+    fflush(stdout);
+
+    trophy_arg_t *ta = (trophy_arg_t *)malloc(sizeof(*ta));
+    if (ta) {
+        ta->id = id;
+        snprintf(ta->name, sizeof(ta->name), "%s", name);
+        pthread_t tid;
+        if (pthread_create(&tid, NULL, trophy_thread, ta) == 0) {
+            pthread_detach(tid);
+        } else {
+            trophy_write_json(id, name);
+            free(ta);
+        }
+    }
+
+    if (platinum) *platinum = (id == 0) ? 0 : -1;
     return 0;
 }
 static ABI int32_t trophy_game_info(int32_t ctx,int32_t handle,void *details,void *data) {

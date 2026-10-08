@@ -23,7 +23,7 @@ export BB_CONFIG=${BB_CONFIG:-$data/bbport.ini}
 if [[ -z ${BB_FSR411_DIR:-} && ! -d fsr4_411 && -d $data/fsr4_411 ]]; then
     export BB_FSR411_DIR=$data/fsr4_411
 fi
-if [[ -z ${BB_PREBUILT:-} && -z ${BB_IN_NIX_SHELL:-} ]] && ! { command -v pkg-config >/dev/null && pkg-config --exists vulkan sdl3; } && command -v nix-shell >/dev/null; then
+if [[ -z ${BB_PREBUILT:-} && -z ${BB_IN_NIX_SHELL:-} && ! ( -x ${BB_PROBE:-out/bb-probe} && -f out/gpu/libbbgpu.so ) ]] && ! { command -v pkg-config >/dev/null && pkg-config --exists vulkan sdl3; } && command -v nix-shell >/dev/null; then
     args=''; if (( $# )); then args=$(printf '%q ' "$@"); fi
     exec env BB_IN_NIX_SHELL=1 nix-shell shell.nix --run "bash run.sh $args"
 fi
@@ -51,6 +51,17 @@ fi
 if [[ -z ${PYTHON:-} ]]; then echo 'Install Python 3 or set PYTHON.' >&2; exit 1; fi
 # BB_GAME_DIR: the game's folder (eboot.bin, sce_module, ...); default next to this directory.
 game=${BB_GAME_DIR:-../CUSA03173}
+if [[ ! -f $game/eboot.bin ]]; then
+    if [[ -f $game/CUSA03173/eboot.bin ]]; then
+        game="$game/CUSA03173"
+    elif [[ -f "$HOME/CUSA03173/CUSA03173/eboot.bin" ]]; then
+        game="$HOME/CUSA03173/CUSA03173"
+    elif [[ -f "$HOME/CUSA03173/eboot.bin" ]]; then
+        game="$HOME/CUSA03173"
+    elif [[ -f "$(dirname "$PWD")/CUSA03173/CUSA03173/eboot.bin" ]]; then
+        game="$(dirname "$PWD")/CUSA03173/CUSA03173"
+    fi
+fi
 if [[ ! -f $game/eboot.bin ]]; then echo "No eboot.bin in $game (set BB_GAME_DIR)." >&2; exit 1; fi
 original_game=$game
 game=$("$PYTHON" scripts/mods.py "$game" --out "$out" \
@@ -168,6 +179,8 @@ if [[ -z ${BB_PREBUILT:-} && -d fsr4_shaders ]] && command -v spirv-cross >/dev/
 fi
 if [[ -n ${BB_PREBUILT:-} ]]; then
     probe=${BB_PROBE:-bin/bb-probe}
+elif [[ -x ${BB_PROBE:-out/bb-probe} && -f out/gpu/libbbgpu.so && ${BB_FORCE_BUILD:-0} != 1 ]]; then
+    probe=${BB_PROBE:-out/bb-probe}
 else
     bash build.sh
     probe=${BB_PROBE:-out/bb-probe}  # BB_PROBE: a wrapper (gdb) around it
